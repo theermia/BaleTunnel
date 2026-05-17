@@ -118,7 +118,7 @@ class BaleWsClient:
             ssl_ctx.verify_mode = ssl.CERT_NONE
             self.ws = await websockets.connect(
                 WS_URL,
-                extra_headers=extra_headers,
+                additional_headers=extra_headers,
                 max_size=2**20,
                 ping_interval=30,
                 ping_timeout=20,
