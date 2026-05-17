@@ -98,9 +98,9 @@ The following results were obtained during real-world testing:
 |-----------|---------|
 | **Server location** | Infomaniak, Switzerland |
 | **Client connection** | Iranian ADSL (Mokhaberat / TCI) |
-| **Download speed** | 8–10 Mbps |
+| **Download speed** | 8–12 Mbps |
 | **Upload speed** | Not measured |
-| **Latency** | 600–1000 ms |
+| **Latency** | 120–170 ms |
 
 > **Note:** Performance depends on network conditions, server load, and ISP throttling. Results may vary.
 
