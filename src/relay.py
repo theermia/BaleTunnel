@@ -384,6 +384,11 @@ class TunnelManager:
             for k, existing_lk in list(self.lk_rooms.items()):
                 if existing_lk._caller_id == caller_id:
                     print(f'[Tunnel/S] replacing existing client {k} from caller {caller_id}')
+                    # Remove from lk_rooms BEFORE disconnect to prevent the
+                    # on_disconnected callback from removing the new entry
+                    self.lk_rooms.pop(k, None)
+                    self._free_snat(existing_lk)
+                    existing_lk.on_disconnected = None
                     existing_lk.disconnect()
         lk = LiveKitTransport()
         lk._call_key = call_key
@@ -416,7 +421,9 @@ class TunnelManager:
                 asyncio.create_task(self._srv_msg(msg, call_key, lk))
         lk.on_data = on_data
         def on_disconnected():
-            self.lk_rooms.pop(call_key, None)
+            # Only remove if this specific lk instance is still the one registered
+            if self.lk_rooms.get(call_key) is lk:
+                self.lk_rooms.pop(call_key, None)
             self._free_snat(lk)
             closed = 0
             for key in list(self.sessions.keys()):
@@ -429,6 +436,8 @@ class TunnelManager:
                     closed += 1
             who = f'{lk._caller_name} ({lk._caller_id})' if lk._caller_name else f'caller {lk._caller_id}'
             print(f'[Tunnel/S] {who} disconnected callKey={call_key} closed={closed} session(s)')
+            # Discard the call so Bale knows we're free for new calls
+            asyncio.create_task(self._discard_call_retry(call_key))
         lk.on_disconnected = on_disconnected
         try:
             await lk.connect(call['url'], call['token'])
@@ -454,6 +463,20 @@ class TunnelManager:
             return False
         lk.disconnect()
         return True
+
+    async def _discard_call_retry(self, call_id):
+        """Retry discard_call until WS is available, so Bale knows we're free."""
+        for attempt in range(15):
+            ws = await self.get_bale()
+            if ws and ws.ready:
+                try:
+                    await ws.discard_call(call_id)
+                    print(f'[Tunnel/S] discard_call {call_id} OK')
+                    return
+                except Exception as e:
+                    print(f'[Tunnel/S] discard_call {call_id} failed: {e}')
+            await asyncio.sleep(2)
+        print(f'[Tunnel/S] discard_call {call_id} gave up after 15 attempts')
 
     async def disconnect_all_clients(self, ws):
         if self.mode != 'server':
@@ -662,6 +685,9 @@ class TunnelManager:
                     if not sess['ready']:
                         sess['queue'].append(chunk)
                         continue
+                    # Backpressure: yield if transport queue is full
+                    if self.lk_transport and self.lk_transport.pressured:
+                        await asyncio.sleep(0)
                     for i in range(0, len(chunk), LK_CHUNK):
                         sl = chunk[i:i+LK_CHUNK]
                         await self._cli_send({'t': 'D', 's': sid, 'data': sl})
@@ -717,7 +743,11 @@ class TunnelManager:
                 encoded = lk_encode(obj)
                 self.lk_transport._tx_pkts += 1
                 self.lk_transport._tx_bytes += len(encoded)
-                await self.lk_transport.send(encoded)
+                # Prioritize control packets over bulk data
+                if obj.get('t') in ('C', 'A', 'X'):
+                    await self.lk_transport.send_urgent(encoded)
+                else:
+                    await self.lk_transport.send(encoded)
         elif self.server_peer:
             ws = await self.get_bale()
             if ws:
@@ -744,7 +774,9 @@ class TunnelManager:
                 self.sessions.pop(key, None)
                 return
             try:
-                reader, writer = await asyncio.open_connection(addr, port)
+                reader, writer = await asyncio.wait_for(
+                    asyncio.open_connection(addr, port), timeout=10
+                )
             except Exception as e:
                 print(f'[Tunnel/S] {key} TCP x {host}:{port} - {e}')
                 await self._srv_send(sess, {'t': 'A', 's': sid, 'ok': False})
@@ -765,6 +797,9 @@ class TunnelManager:
                             break
                         sess['rx_bytes'] += len(chunk)
                         if sess['lk']:
+                            # Backpressure: if queue is full, yield to let other tasks run
+                            if sess['lk'].pressured:
+                                await asyncio.sleep(0)
                             for i in range(0, len(chunk), LK_CHUNK):
                                 frame = lk_encode({'t': 'D', 's': sid, 'data': chunk[i:i+LK_CHUNK]})
                                 sess['lk']._tx_pkts += 1

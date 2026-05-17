@@ -105,10 +105,23 @@ class CLI:
             await self.tunnel.on_call_received(call_id, call_entity)
         async def on_call_ended(call_id):
             call_key = str(call_id)
+            print(f'[CLI/S] on_call_ended callKey={call_key} pending={call_key in self.tunnel.pending_map} active={call_key in self.tunnel.lk_rooms}')
             if call_key in self.tunnel.pending_map:
                 self.tunnel.pending_map.pop(call_key, None)
             if call_key in self.tunnel.lk_rooms:
                 self.tunnel.disconnect_client(call_key)
+                await asyncio.sleep(0.1)
+            # Explicitly discard the call so Bale knows we're free for new calls
+            # Retry if WS is not ready yet (it may be reconnecting)
+            for _ in range(10):
+                if self.client.ready:
+                    try:
+                        await self.client.discard_call(call_id)
+                        break
+                    except Exception:
+                        pass
+                await asyncio.sleep(1)
+            print(f'[CLI/S] on_call_ended done. lk_rooms={list(self.tunnel.lk_rooms.keys())} ws_ready={self.client.ready}')
         self.client.add_on_call_received(on_call_received)
         self.client.add_on_call_ended(on_call_ended)
 
@@ -118,8 +131,25 @@ class CLI:
         print('')
         if self.mode == 'server':
             await self.tunnel.configure('server')
+            # Start WS watchdog for server mode - ensures WS stays connected
+            asyncio.create_task(self._ws_watchdog())
         await self.connection.reconcile()
         await self._input_loop()
+
+    async def _ws_watchdog(self):
+        """Ensure WS stays connected in server mode"""
+        while True:
+            await asyncio.sleep(5)
+            if self.connection.user_initiated_disconnect:
+                continue
+            if not self.client.access_token:
+                continue
+            if not self.client.ready and not self.client.connecting:
+                print('[Watchdog] WS down - reconnecting...')
+                try:
+                    await self.client.connect()
+                except Exception as e:
+                    print(f'[Watchdog] reconnect failed: {e}')
 
     async def _input_loop(self):
         loop = asyncio.get_event_loop()

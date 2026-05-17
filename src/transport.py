@@ -73,6 +73,7 @@ class LiveKitTransport:
             return
         room = self.room
         self.room = None
+        self.has_peer = False
         self._urgent_queue = []
         self._normal_queue = []
         try:
@@ -85,6 +86,11 @@ class LiveKitTransport:
     async def send(self, data: bytes):
         if not self.room:
             return
+        # Flow control: yield if queue is too full to prevent memory explosion
+        while len(self._normal_queue) >= NORMAL_QUEUE_HIGH:
+            await asyncio.sleep(0)
+            if not self.room:
+                return
         self._normal_queue.append(data)
         await self._drain()
 
@@ -105,6 +111,7 @@ class LiveKitTransport:
     async def _drain(self):
         if not self.room:
             return
+        sent = 0
         while self._urgent_queue or self._normal_queue:
             data = (self._urgent_queue.pop(0) if self._urgent_queue
                     else self._normal_queue.pop(0))
@@ -112,6 +119,11 @@ class LiveKitTransport:
                 await self.room.local_participant.publish_data(data, reliable=True)
             except Exception as e:
                 print(f"[LK] send failed: {e}")
+                break
+            sent += 1
+            # Yield every 8 packets to prevent event loop starvation
+            if sent % 8 == 0:
+                await asyncio.sleep(0)
         if self._drain_pending:
             self._drain_pending = False
             if self.on_drain:

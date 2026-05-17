@@ -120,9 +120,9 @@ class BaleWsClient:
                 WS_URL,
                 additional_headers=extra_headers,
                 max_size=2**20,
-                ping_interval=20,
-                ping_timeout=10,
-                close_timeout=5,
+                ping_interval=30,
+                ping_timeout=20,
+                close_timeout=10,
                 ssl=ssl_ctx,
             )
             self.connecting = False
@@ -208,7 +208,7 @@ class BaleWsClient:
     async def _schedule_reconnect(self):
         attempt = self._reconnect_attempt
         self._reconnect_attempt += 1
-        delay = min(3 * (2 ** min(attempt, 4)), 30)
+        delay = min(1 * (2 ** min(attempt, 4)), 15)
         print(f"[WS] Reconnecting in {delay}s (attempt {attempt + 1})")
         self._reconnect_task = asyncio.create_task(self._reconnect_after(delay))
 
@@ -278,18 +278,18 @@ class BaleWsClient:
 
         async def ping_loop():
             while self.ready and self.ws:
-                await asyncio.sleep(10)
+                await asyncio.sleep(15)
                 if not self.ready or not self.ws:
                     break
                 idle = time.time() - self._last_inbound_ts
-                if idle > 30:
+                if idle > 60:
                     print(f"[WS] No inbound for {idle:.0f}s - closing zombie connection")
                     try:
                         await self.ws.close()
                     except Exception:
                         pass
                     break
-                if idle > 15:
+                if idle > 30:
                     print(f"[WS] idle {idle:.0f}s - no inbound")
                 self.ping_counter += 1
                 try:
